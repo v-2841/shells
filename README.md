@@ -18,7 +18,7 @@ This repo contains scripts to install or remove tuned shells on Fedora.
 Run the command under the user that should receive the Zsh setup. It downloads `zsh-install.sh` from GitHub and executes it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/v-2841/zsh-install/main/zsh-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/v-2841/shells/main/zsh-install.sh | bash
 ```
 
 The script prints the target user, home directory, and progress. Once it finishes, log out/in or open a new terminal so Zsh becomes the default shell.
@@ -27,7 +27,7 @@ The script prints the target user, home directory, and progress. Once it finishe
 Pass the `uninstall` argument to remove `~/.oh-my-zsh`, optionally delete `~/.zshrc` (default: keep), and switch the login shell back to `bash`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/v-2841/zsh-install/main/zsh-install.sh | bash -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/v-2841/shells/main/zsh-install.sh | bash -s -- uninstall
 ```
 
 ### Re-running
@@ -42,5 +42,5 @@ Running the installer again keeps existing settings intact while updating Oh My 
 
 ### Installation
 ```bash
-curl -fsSL https://raw.githubusercontent.com/v-2841/zsh-install/main/fish-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/v-2841/shells/main/fish-install.sh | bash
 ```
