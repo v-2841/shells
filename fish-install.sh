@@ -13,15 +13,6 @@ run_as_target() {
 
 sudo dnf install -y fish
 
-run_as_target fish -c '
-printf "y\n" | fish_config prompt save terlar
-printf "y\n" | fish_config theme save "ayu Dark"
-alias --save up "sudo dnf update --refresh"
-alias --save grub-update "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
-set -U fish_prompt_pwd_dir_length 0
-fish_update_completions
-'
-
 FISH_PATH="$(command -v fish)"
 CURRENT_SHELL="$(getent passwd "$TARGET_USER" | cut -d: -f7)"
 if [[ "$CURRENT_SHELL" != "$FISH_PATH" ]]; then
@@ -31,3 +22,12 @@ if [[ "$CURRENT_SHELL" != "$FISH_PATH" ]]; then
     sudo chsh -s "$FISH_PATH" "$TARGET_USER"
   fi
 fi
+
+run_as_target fish -c '
+printf "y\n" | fish_config prompt save terlar
+printf "y\n" | fish_config theme save "ayu Dark"
+alias --save up "sudo dnf update --refresh"
+alias --save grub-update "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
+set -U fish_prompt_pwd_dir_length 0
+fish_update_completions
+'
