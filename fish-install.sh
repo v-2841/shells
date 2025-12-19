@@ -15,6 +15,7 @@ sudo dnf install -y fish
 
 run_as_target fish -c '
 set -U fish_greeting
+mkdir -p ~/.local/bin
 fish_add_path -m ~/.local/bin
 printf "y\n" | fish_config prompt save terlar
 printf "y\n" | fish_config theme save "ayu Dark"
