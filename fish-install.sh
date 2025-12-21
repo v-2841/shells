@@ -20,6 +20,7 @@ fish_add_path -m ~/.local/bin
 printf "y\n" | fish_config prompt save terlar
 printf "y\n" | fish_config theme save "ayu Dark"
 alias --save up "sudo dnf update --refresh"
+alias --save upp "up --setopt=max_parallel_downloads=9"
 alias --save grub-update "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
 set -U fish_prompt_pwd_dir_length 0
 fish_update_completions

@@ -205,6 +205,7 @@ begin = "# Custom aliases"
 block = "\n\n".join([
     begin,
     'alias up="sudo dnf update --refresh"',
+    'alias upp="up --setopt=max_parallel_downloads=9"',
     'alias grub-update="sudo grub2-mkconfig -o /boot/grub2/grub.cfg"',
 ]) + "\n"
 
