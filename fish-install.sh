@@ -14,7 +14,11 @@ run_as_target() {
 sudo dnf install -y fish fastfetch
 
 run_as_target fish -c '
-set -U fish_greeting fastfetch
+function fish_greeting
+    fastfetch
+end
+funcsave fish_greeting
+touch .hushlogin
 mkdir -p ~/.local/bin
 fish_add_path -m ~/.local/bin
 printf "y\n" | fish_config prompt save terlar
