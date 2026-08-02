@@ -11,9 +11,31 @@ run_as_target() {
   fi
 }
 
+prompt_yes_default() {
+  local prompt="$1" reply=""
+
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt [Y/n] " reply || reply=""
+  elif [[ -t 1 ]] && [[ -r /dev/tty ]]; then
+    read -r -p "$prompt [Y/n] " reply </dev/tty || reply=""
+  else
+    echo "$prompt [Y/n] (default: Y)" >&2
+  fi
+
+  case "${reply,,}" in
+    n|no) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 sudo dnf install -y fish fastfetch
 
-run_as_target fish -c '
+SAVE_GRUB_ALIAS=0
+if prompt_yes_default "Save the grub-update alias?"; then
+  SAVE_GRUB_ALIAS=1
+fi
+
+run_as_target env SAVE_GRUB_ALIAS="$SAVE_GRUB_ALIAS" fish -c '
 function fish_greeting
     fastfetch
 end
@@ -25,7 +47,9 @@ printf "y\n" | fish_config prompt save terlar
 printf "y\n" | fish_config theme save "ayu Dark"
 alias --save up "sudo dnf update --refresh"
 alias --save upp "up --setopt=max_parallel_downloads=9"
-alias --save grub-update "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
+if test "$SAVE_GRUB_ALIAS" = 1
+    alias --save grub-update "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
+end
 set -U fish_prompt_pwd_dir_length 0
 fish_update_completions
 '
