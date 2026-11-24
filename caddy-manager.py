@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 APP_NAME = "Caddy Manager"
 
 DEFAULT_REPOSITORY_URL = "https://raw.githubusercontent.com/v-2841/shells/main"
@@ -194,11 +194,7 @@ class UI:
                     print()
                     return "0"
                 print("\a", end="", flush=True)
-        try:
-            return input(self.c.dim("Выберите пункт: ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return "0"
+        return self.read_line(self.c.dim("Выберите пункт: ")) or "0"
 
     def read_key(self) -> str:
         descriptor = sys.stdin.fileno()
@@ -209,21 +205,34 @@ class UI:
         finally:
             termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
 
+    def read_line(self, prompt: str) -> Optional[str]:
+        while True:
+            print(prompt, end="", flush=True)
+            try:
+                line = sys.stdin.readline()
+            except KeyboardInterrupt:
+                line = ""
+            if not line:
+                print()
+                return None
+            # Invalid terminal bytes are preserved by stdin's surrogateescape handler.
+            if re.search(r"[\udc80-\udcff]", line):
+                self.warning("Некорректная кодировка ввода. Повторите ввод.")
+                continue
+            return line.strip()
+
     def ask(self, prompt: str, default: str = "") -> str:
         suffix = f" [{default}]" if default else ""
-        try:
-            value = input(f"{prompt}{self.c.dim(suffix)}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return default
-        return value or default
+        return self.read_line(f"{prompt}{self.c.dim(suffix)}: ") or default
 
     def confirm(self, prompt: str, default: bool = True) -> bool:
         marker = "Y/n" if default else "y/N"
-        answer = self.ask(f"{prompt} [{marker}]").lower()
+        answer = self.read_line(f"{prompt} [{marker}]: ")
+        if answer is None:
+            return False
         if not answer:
             return default
-        return answer in {"y", "yes", "д", "да"}
+        return answer.lower() in {"y", "yes", "д", "да"}
 
     def info(self, message: str) -> None:
         print(f"{self.c.cyan('●')} {message}")
@@ -493,13 +502,20 @@ def manager_source_version(source: str) -> str:
     return values["APP_VERSION"]
 
 
-def module_specs(modules: Sequence[Dict[str, Any]], pin_versions: bool = True) -> List[str]:
+def manager_version_key(version: str) -> Tuple[int, ...]:
+    if not re.fullmatch(r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}", version):
+        raise ManagerError(f"Некорректная версия Caddy Manager: {version!r}")
+    return tuple(int(part) for part in version.split("."))
+
+
+def module_specs(modules: Sequence[Dict[str, Any]]) -> List[str]:
     specs: List[str] = []
     for module in modules:
         package = str(module.get("package", "")).strip()
         version = str(module.get("version") or "").strip()
-        parse_package_spec(package)
-        specs.append(f"{package}@{version}" if pin_versions and version else package)
+        spec = f"{package}@{version}" if version else package
+        parse_package_spec(spec)
+        specs.append(spec)
     return specs
 
 
@@ -617,7 +633,7 @@ class CaddyManager:
                 ui.pause()
             except KeyboardInterrupt:
                 print()
-                ui.warning("Операция прервана. Установленные файлы не изменены, если замена ещё не началась.")
+                ui.warning("Операция прервана.")
                 ui.pause()
 
     def update_manager(self) -> None:
@@ -642,8 +658,13 @@ class CaddyManager:
             raise ManagerError("Сервер вернул неожиданный файл.") from exc
         available_version = manager_source_version(source)
 
-        if available_version == APP_VERSION:
-            ui.success(f"Установлена актуальная версия {APP_VERSION}.")
+        available_key = manager_version_key(available_version)
+        current_key = manager_version_key(APP_VERSION)
+        if available_key <= current_key:
+            if available_key == current_key:
+                ui.success(f"Установлена актуальная версия {APP_VERSION}.")
+            else:
+                ui.info(f"Установлена версия {APP_VERSION}. В репозитории доступна более старая {available_version}.")
             ui.pause()
             return
         if not ui.confirm(f"Обновить Caddy Manager {APP_VERSION} → {available_version}?", True):
@@ -660,11 +681,10 @@ class CaddyManager:
         self,
         modules: Sequence[Dict[str, Any]],
         *,
-        pin_versions: bool,
         directory: Path,
     ) -> Build:
         arch = architecture()
-        specs = module_specs(modules, pin_versions=pin_versions)
+        specs = module_specs(modules)
         parameters: List[Tuple[str, str]] = [
             ("os", "linux"),
             ("arch", arch),
@@ -729,26 +749,26 @@ class CaddyManager:
         missing: List[str] = []
         for item in requested:
             package = str(item["package"])
-            version = dependencies.get(package)
-            if not version:
-                old_version = str(item.get("version") or "")
-                if old_version:
-                    version = old_version
-                else:
-                    missing.append(package)
-                    continue
-            resolved.append({"package": package, "version": version})
+            module_path = package
+            while module_path and module_path not in dependencies:
+                module_path = module_path.rpartition("/")[0]
+            if not module_path:
+                missing.append(package)
+                continue
+            resolved.append({"package": package, "version": dependencies[module_path]})
         if missing:
             raise ManagerError(
                 "Не удалось подтвердить наличие модулей в сборке: " + ", ".join(missing)
             )
         return resolved
 
-    def validate_config(self, binary: Path = CADDY_BINARY) -> Tuple[bool, str]:
-        if not CADDY_CONFIG.is_file():
-            return False, f"Файл {CADDY_CONFIG} не найден."
+    def validate_config(self, binary: Path = CADDY_BINARY, *, config: Optional[Path] = None) -> Tuple[bool, str]:
+        if config is None:
+            config = CADDY_CONFIG
+        if not config.is_file():
+            return False, f"Файл {config} не найден."
         result = run_command(
-            [str(binary), "validate", "--config", str(CADDY_CONFIG), "--adapter", "caddyfile"],
+            [str(binary), "validate", "--config", str(config), "--adapter", "caddyfile"],
             timeout=120,
         )
         output = (result.stderr or result.stdout or "").strip()
@@ -806,25 +826,16 @@ class CaddyManager:
     def write_service(self) -> None:
         atomic_write_text(CADDY_UNIT, CADDY_SERVICE, 0o644)
         if shutil.which("restorecon"):
-            run_command(["restorecon", "-F", str(CADDY_UNIT)], capture=True)
+            run_command(["restorecon", "-F", str(CADDY_UNIT)], check=True)
         run_command(["systemctl", "daemon-reload"], check=True)
 
-    def remove_rpm_conflict(self) -> None:
-        if not self.rpm_installed():
-            return
+    def remove_rpm_conflict(self, *, packaged_default: bool) -> None:
         ui.warning("Обнаружен пакет Caddy, установленный через RPM/DNF.")
         print("  Ручная и пакетная установки не должны одновременно управлять caddy.service.")
         if not ui.confirm("Удалить RPM-пакет Caddy, сохранив конфигурацию и данные?", True):
             raise ManagerError("Установка отменена: сначала нужно убрать конфликтующий RPM-пакет.")
 
-        snapshot: Optional[bytes] = None
-        packaged_default = False
-        if CADDY_CONFIG.is_file():
-            snapshot = CADDY_CONFIG.read_bytes()
-            # If any packaged file differs, preserve the existing Caddyfile
-            # conservatively instead of assuming that it is still the default.
-            verification = run_command(["rpm", "-V", "caddy"])
-            packaged_default = verification.returncode == 0 and not verification.stdout.strip()
+        snapshot = CADDY_CONFIG.read_bytes() if CADDY_CONFIG.is_file() else None
         run_command(
             ["dnf", "remove", "--no-autoremove", "-y", "caddy"],
             check=True,
@@ -840,52 +851,101 @@ class CaddyManager:
             atomic_write(CADDY_CONFIG, snapshot, 0o640)
         ui.success("RPM-пакет удалён; /etc/caddy и /var/lib/caddy сохранены.")
 
-    def activate_build(self, build: Build) -> None:
+    def restart_caddy(self) -> None:
+        run_command(["systemctl", "restart", "caddy"], check=True)
+        if not self.service_active():
+            raise ManagerError("Служба Caddy не запустилась после перезапуска.")
+
+    def replace_build(self, binary: Path, state: Dict[str, Any], *, repair_service: bool = False) -> None:
         CADDY_BINARY.parent.mkdir(parents=True, exist_ok=True)
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        old_exists = CADDY_BINARY.is_file()
-        old_state = load_state()
+        current_state = load_state()
         active_before = self.service_active()
+        paths = [CADDY_BINARY, STATE_FILE, PREVIOUS_BINARY, PREVIOUS_STATE_FILE]
+        if repair_service:
+            paths.append(CADDY_UNIT)
 
-        if old_exists:
-            shutil.copy2(CADDY_BINARY, PREVIOUS_BINARY)
-            os.chmod(PREVIOUS_BINARY, 0o700)
-            save_state(old_state, PREVIOUS_STATE_FILE)
+        with contextlib.ExitStack() as cleanup:
+            originals: Dict[Path, Path] = {}
+            for path in paths:
+                if path.exists() or path.is_symlink():
+                    directory = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+                    cleanup.callback(shutil.rmtree, directory, ignore_errors=True)
+                    original = directory / path.name
+                    # Keep the original inode so recovery needs only a rename on the same filesystem.
+                    os.link(path, original, follow_symlinks=False)
+                    originals[path] = original
 
-        try:
-            atomic_copy(build.path, CADDY_BINARY, 0o755)
-            if shutil.which("restorecon"):
-                run_command(["restorecon", "-F", str(CADDY_BINARY)])
+            current_binary = None
+            if CADDY_BINARY.is_file():
+                current_binary = originals[CADDY_BINARY]
+                if current_binary.is_symlink():
+                    current_binary = CADDY_BINARY.resolve(strict=True)
 
-            new_state = {
-                "schema": 1,
-                "caddy_version": build.version,
-                "sha256": build.checksum,
-                "architecture": architecture(),
-                "modules": build.modules,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            if active_before:
-                restart = run_command(["systemctl", "restart", "caddy"])
-                if restart.returncode != 0 or not self.service_active():
-                    details = (restart.stderr or restart.stdout or "служба не запустилась").strip()
-                    raise ManagerError(f"Новая сборка не запустилась: {details}")
-            save_state(new_state)
-            self.state = new_state
-        except Exception:
-            if old_exists and PREVIOUS_BINARY.is_file():
-                atomic_copy(PREVIOUS_BINARY, CADDY_BINARY, 0o755)
+            unit_attempted = False
+            restart_attempted = False
+            try:
+                atomic_copy(binary, CADDY_BINARY, 0o755)
                 if shutil.which("restorecon"):
-                    run_command(["restorecon", "-F", str(CADDY_BINARY)])
+                    run_command(["restorecon", "-F", str(CADDY_BINARY)], check=True)
+                save_state(state)
+                if current_binary is not None:
+                    atomic_copy(current_binary, PREVIOUS_BINARY, 0o700)
+                    save_state(current_state, PREVIOUS_STATE_FILE)
+                if repair_service:
+                    unit_attempted = True
+                    self.write_service()
                 if active_before:
-                    run_command(["systemctl", "restart", "caddy"])
-            elif not old_exists:
-                CADDY_BINARY.unlink(missing_ok=True)
-            raise
+                    restart_attempted = True
+                    self.restart_caddy()
+            except (Exception, KeyboardInterrupt) as error:
+                recovery_errors = []
+                for path in paths:
+                    original = originals.get(path)
+                    try:
+                        if original is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            os.replace(original, path)
+                    except (OSError, KeyboardInterrupt) as recovery_error:
+                        recovery_errors.append(f"{path} (копия: {original}): {recovery_error}")
+                if recovery_errors:
+                    cleanup.pop_all()
+                    raise ManagerError("Не удалось восстановить файлы Caddy:\n" + "\n".join(recovery_errors)) from error
+                try:
+                    if unit_attempted:
+                        run_command(["systemctl", "daemon-reload"], check=True)
+                    if restart_attempted:
+                        self.restart_caddy()
+                except (Exception, KeyboardInterrupt) as recovery_error:
+                    raise ManagerError(f"Файлы Caddy восстановлены, но служба не восстановилась: {recovery_error}") from error
+                raise
+        self.state = state
 
-    def rebuild(self, modules: Sequence[Dict[str, Any]], *, pin_versions: bool) -> None:
+    def activate_build(self, build: Build, *, repair_service: bool = False) -> None:
+        state = {
+            "schema": 1,
+            "caddy_version": build.version,
+            "sha256": build.checksum,
+            "architecture": architecture(),
+            "modules": build.modules,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self.replace_build(build.path, state, repair_service=repair_service)
+
+    def rebuild(self, modules: Sequence[Dict[str, Any]], *, preserve_versions: bool = False) -> None:
         with tempfile.TemporaryDirectory(prefix="caddy-manager-") as temporary:
-            build = self.download_build(modules, pin_versions=pin_versions, directory=Path(temporary))
+            build = self.download_build(modules, directory=Path(temporary))
+            if preserve_versions:
+                expected = {item["package"]: item["version"] for item in modules if item.get("version")}
+                for item in build.modules:
+                    package = item["package"]
+                    version = expected.get(package)
+                    if version and version != item["version"]:
+                        raise ManagerError(
+                            f"Сервис изменил зафиксированную версию {package}: "
+                            f"запрошена {version}, получена {item['version']}. Сборка отклонена."
+                        )
             valid, details = self.validate_config(build.path)
             if not valid:
                 raise ManagerError(f"Новая сборка не принимает текущий Caddyfile:\n{details}")
@@ -903,14 +963,28 @@ class CaddyManager:
             modules = []
 
         with tempfile.TemporaryDirectory(prefix="caddy-manager-") as temporary:
-            build = self.download_build(modules, pin_versions=True, directory=Path(temporary))
-            self.remove_rpm_conflict()
-            self.ensure_user_and_directories()
-            self.write_service()
-            valid, details = self.validate_config(build.path)
+            directory = Path(temporary)
+            build = self.download_build(modules, directory=directory)
+            rpm_installed = self.rpm_installed()
+            packaged_default = False
+            if rpm_installed and CADDY_CONFIG.is_file():
+                verification = run_command(["rpm", "-V", "caddy"])
+                packaged_default = verification.returncode == 0 and not verification.stdout.strip()
+            config = CADDY_CONFIG
+            if packaged_default or not config.exists():
+                config = directory / "Caddyfile"
+                # Resolve imports from their installed paths, including nested relative imports.
+                staged_config = DEFAULT_CADDYFILE.replace(
+                    "import Caddyfile.d/*.caddyfile", f'import "{CADDY_SNIPPETS}/*.caddyfile"',
+                )
+                config.write_text(staged_config, encoding="utf-8")
+            valid, details = self.validate_config(build.path, config=config)
             if not valid:
                 raise ManagerError(f"Caddyfile не прошёл проверку новой сборкой:\n{details}")
-            self.activate_build(build)
+            if rpm_installed:
+                self.remove_rpm_conflict(packaged_default=packaged_default)
+            self.ensure_user_and_directories()
+            self.activate_build(build, repair_service=True)
 
         ui.success(f"Caddy {build.version} установлена в {CADDY_BINARY}.")
         if self.service_active():
@@ -947,13 +1021,13 @@ class CaddyManager:
                 if choice == "1":
                     self.check_latest_version()
                 elif choice == "2":
-                    self.rebuild(self.state.get("modules", []), pin_versions=True)
+                    self.rebuild(self.state.get("modules", []), preserve_versions=True)
                 elif choice == "3":
                     modules = [
                         {"package": item["package"], "version": None}
                         for item in self.state.get("modules", [])
                     ]
-                    self.rebuild(modules, pin_versions=False)
+                    self.rebuild(modules)
                 elif choice == "4":
                     self.rollback()
                 else:
@@ -987,31 +1061,7 @@ class CaddyManager:
         if not valid:
             raise ManagerError(f"Предыдущая сборка не принимает текущий Caddyfile:\n{details}")
 
-        active = self.service_active()
-        with tempfile.TemporaryDirectory(prefix="caddy-rollback-") as temporary:
-            current_copy = Path(temporary) / "caddy.current"
-            shutil.copy2(CADDY_BINARY, current_copy)
-            current_state = load_state()
-            try:
-                atomic_copy(PREVIOUS_BINARY, CADDY_BINARY, 0o755)
-                if shutil.which("restorecon"):
-                    run_command(["restorecon", "-F", str(CADDY_BINARY)])
-                if active:
-                    result = run_command(["systemctl", "restart", "caddy"])
-                    if result.returncode != 0 or not self.service_active():
-                        raise ManagerError((result.stderr or result.stdout or "служба не запустилась").strip())
-                shutil.copy2(current_copy, PREVIOUS_BINARY)
-                os.chmod(PREVIOUS_BINARY, 0o700)
-                save_state(current_state, PREVIOUS_STATE_FILE)
-                save_state(previous_state)
-                self.state = previous_state
-            except Exception:
-                atomic_copy(current_copy, CADDY_BINARY, 0o755)
-                if shutil.which("restorecon"):
-                    run_command(["restorecon", "-F", str(CADDY_BINARY)])
-                if active:
-                    run_command(["systemctl", "restart", "caddy"])
-                raise
+        self.replace_build(PREVIOUS_BINARY, previous_state)
         ui.success(f"Восстановлена Caddy {previous_version}.")
 
     def addons_menu(self) -> None:
@@ -1027,6 +1077,7 @@ class CaddyManager:
                     ("3", "Удалить аддон"),
                     ("4", "Обновить все аддоны"),
                     ("5", "Обновить каталог"),
+                    ("6", "Обновить один аддон"),
                     ("0", "Назад"),
                 ],
             )
@@ -1047,10 +1098,12 @@ class CaddyManager:
                     if not modules:
                         ui.info("Аддоны ещё не установлены.")
                     elif ui.confirm("Пересобрать Caddy с последними версиями всех аддонов?", True):
-                        self.rebuild(modules, pin_versions=False)
+                        self.rebuild(modules)
                 elif choice == "5":
                     self.catalog(refresh=True)
                     ui.success("Каталог обновлён.")
+                elif choice == "6":
+                    self.update_addon()
                 else:
                     ui.warning("Такого пункта нет.")
             except (ManagerError, OSError) as exc:
@@ -1153,7 +1206,36 @@ class CaddyManager:
         if any(item.get("package") == package for item in modules):
             raise ManagerError("Этот аддон уже установлен.")
         modules.append({"package": package, "version": version})
-        self.rebuild(modules, pin_versions=True)
+        self.rebuild(modules)
+
+    def select_installed_addon(self, prompt: str, count: int) -> Optional[int]:
+        selection = ui.ask(f"{prompt} (0 — отмена)", "0")
+        try:
+            number = int(selection)
+        except ValueError as exc:
+            raise ManagerError("Выбран некорректный номер.") from exc
+        if number == 0:
+            return None
+        if not 1 <= number <= count:
+            raise ManagerError("Выбран некорректный номер.")
+        return number - 1
+
+    def update_addon(self) -> None:
+        modules = [dict(item) for item in self.state.get("modules", [])]
+        if not modules:
+            ui.info("Аддоны ещё не установлены.")
+            return
+        index = self.select_installed_addon("Номер обновляемого аддона", len(modules))
+        if index is None:
+            return
+        selected = modules[index]
+        selected["version"] = None
+        for position, item in enumerate(modules):
+            if position != index and not item.get("version"):
+                raise ManagerError(f"Версия аддона {item['package']} неизвестна. Невозможно её сохранить.")
+        ui.info("Сервис сборок может также вернуть более новую версию Caddy.")
+        if ui.confirm(f"Обновить {selected['package']} и пересобрать Caddy?", False):
+            self.rebuild(modules, preserve_versions=True)
 
     def remove_addon(self) -> None:
         modules = [dict(item) for item in self.state.get("modules", [])]
@@ -1161,15 +1243,12 @@ class CaddyManager:
             ui.info("Удалять нечего.")
             return
         self.print_modules()
-        selection = ui.ask("Номер удаляемого аддона (0 — отмена)", "0")
-        if not selection.isdigit() or int(selection) == 0:
+        index = self.select_installed_addon("Номер удаляемого аддона", len(modules))
+        if index is None:
             return
-        index = int(selection) - 1
-        if index < 0 or index >= len(modules):
-            raise ManagerError("Выбран некорректный номер.")
         removed = modules.pop(index)
         if ui.confirm(f"Удалить {removed['package']} и пересобрать Caddy?", False):
-            self.rebuild(modules, pin_versions=True)
+            self.rebuild(modules)
 
     def service_menu(self) -> None:
         while True:
@@ -1306,10 +1385,12 @@ class CaddyManager:
         )
         if not ui.confirm("Остановить службу и удалить ручную установку Caddy?", False):
             return
-        run_command(["systemctl", "disable", "--now", "caddy"])
+        run_command(["systemctl", "disable", "--now", "caddy"], check=True)
+        if self.service_active():
+            raise ManagerError("Служба Caddy всё ещё запущена. Удаление отменено.")
         CADDY_UNIT.unlink(missing_ok=True)
         CADDY_BINARY.unlink(missing_ok=True)
-        run_command(["systemctl", "daemon-reload"])
+        run_command(["systemctl", "daemon-reload"], check=True)
         run_command(["systemctl", "reset-failed", "caddy"])
         ui.success("Caddy удалена. Конфигурация и данные сохранены.")
 
@@ -1340,6 +1421,7 @@ def main() -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ManagerError("Менеджеру нужен интерактивный терминал. Запустите: caddy-manager")
         require_root()
+        sys.stdin.reconfigure(errors="surrogateescape")
         with process_lock():
             CaddyManager().run()
         return 0
@@ -1348,7 +1430,7 @@ def main() -> int:
         return 1
     except KeyboardInterrupt:
         print()
-        ui.warning("Выход без изменений.")
+        ui.warning("Работа прервана.")
         return 130
 
 
